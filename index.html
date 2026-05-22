@@ -1049,11 +1049,14 @@ manifold 위의 generative models (flow matching, diffusion) 를 개발합니다
 
 <script>
 (function() {
+  // Vietoris–Rips filtration animation
+  // Draws VR(P, r(t)): 1-skeleton + filled 2-simplices as r(t) breathes
   const canvas = document.getElementById('hero-canvas');
   if (!canvas) return;
   if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   const ctx = canvas.getContext('2d');
   let W, H, DPR, nodes = [], raf;
+
   function getColor() {
     const s = getComputedStyle(document.documentElement);
     return {
@@ -1063,51 +1066,133 @@ manifold 위의 generative models (flow matching, diffusion) 를 개발합니다
     };
   }
   let color = getColor();
+
   function resize() {
     DPR = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
     W = rect.width; H = rect.height;
     canvas.width = W * DPR; canvas.height = H * DPR;
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    const density = Math.min(70, Math.floor((W * H) / 14000));
+    // Cap at ~95 points so the triple adjacency-list loop stays well within budget
+    const density = Math.min(95, Math.floor((W * H) / 7000));
     nodes = [];
     for (let i = 0; i < density; i++) {
       nodes.push({
         x: Math.random() * W,
         y: Math.random() * H,
-        vx: (Math.random() - 0.5) * 0.18,
-        vy: (Math.random() - 0.5) * 0.18,
-        r: Math.random() * 1.5 + 0.6,
+        vx: (Math.random() - 0.5) * 0.36,
+        vy: (Math.random() - 0.5) * 0.36,
+        r: Math.random() * 2.0 + 1.6,
       });
     }
   }
+
   function step() {
     ctx.clearRect(0, 0, W, H);
-    const c = color, linkDist = 130;
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const a = nodes[i], b = nodes[j];
-        const dx = a.x - b.x, dy = a.y - b.y, d2 = dx*dx + dy*dy;
-        if (d2 < linkDist * linkDist) {
-          const alpha = (1 - Math.sqrt(d2) / linkDist) * 0.18;
-          ctx.strokeStyle = `rgba(${c.r},${c.g},${c.b},${alpha})`;
-          ctx.lineWidth = 0.7;
-          ctx.beginPath();
-          ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    const c = color;
+    const n = nodes.length;
+
+    // Time-varying Vietoris–Rips radius — slow "breathing" oscillation
+    const t = performance.now() / 1000;
+    const rBase   = 105;
+    const rAmp    = 0.30;
+    const rPeriod = 9.0;
+    const r = rBase * (1 + rAmp * Math.sin(2 * Math.PI * t / rPeriod));
+    const r2 = r * r;
+
+    // Update positions (bounce off edges)
+    for (let i = 0; i < n; i++) {
+      const nd = nodes[i];
+      nd.x += nd.vx; nd.y += nd.vy;
+      if (nd.x < 0 || nd.x > W) nd.vx *= -1;
+      if (nd.y < 0 || nd.y > H) nd.vy *= -1;
+      // clamp after bounce to avoid rare stuck-outside states
+      nd.x = Math.max(0, Math.min(W, nd.x));
+      nd.y = Math.max(0, Math.min(H, nd.y));
+    }
+
+    // Build adjacency list and store pairwise distances for reuse
+    // dist[i][j] (i < j) = actual distance if < r, else Infinity
+    const adj = Array.from({length: n}, () => []);
+    const dist = [];
+    for (let i = 0; i < n; i++) dist.push(new Float32Array(n).fill(Infinity));
+
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const dx = nodes[i].x - nodes[j].x;
+        const dy = nodes[i].y - nodes[j].y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < r2) {
+          const d = Math.sqrt(d2);
+          dist[i][j] = d;
+          dist[j][i] = d;
+          adj[i].push(j);
+          adj[j].push(i);
         }
       }
     }
-    for (const n of nodes) {
-      n.x += n.vx; n.y += n.vy;
-      if (n.x < 0 || n.x > W) n.vx *= -1;
-      if (n.y < 0 || n.y > H) n.vy *= -1;
-      ctx.fillStyle = `rgba(${c.r},${c.g},${c.b},0.35)`;
+
+    // --- Draw order: triangles → edges → nodes ---
+
+    // 2-simplices: fill triangles for all (i,j,k) in VR complex
+    // adjacency-list iteration: O(n * deg^2) in practice, far cheaper than O(n^3)
+    for (let i = 0; i < n; i++) {
+      const ni = adj[i];
+      for (let ji = 0; ji < ni.length; ji++) {
+        const j = ni[ji];
+        if (j <= i) continue;
+        const dij = dist[i][j];
+        const alphaIJ = (1 - dij / r) * 0.55;
+        for (let ki = 0; ki < ni.length; ki++) {
+          const k = ni[ki];
+          if (k <= j) continue;
+          // Check j–k edge exists
+          const djk = dist[j][k];
+          if (djk === Infinity) continue;
+          const dik = dist[i][k];
+          if (dik === Infinity) continue;
+          const alphaJK = (1 - djk / r) * 0.55;
+          const alphaIK = (1 - dik / r) * 0.55;
+          // Triangle fill alpha: minimum edge alpha * 0.18 (subtle)
+          const triAlpha = Math.min(alphaIJ, alphaJK, alphaIK) * 0.18;
+          ctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${triAlpha.toFixed(3)})`;
+          ctx.beginPath();
+          ctx.moveTo(nodes[i].x, nodes[i].y);
+          ctx.lineTo(nodes[j].x, nodes[j].y);
+          ctx.lineTo(nodes[k].x, nodes[k].y);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+    }
+
+    // 1-skeleton: edges
+    ctx.lineWidth = 0.7;
+    for (let i = 0; i < n; i++) {
+      const ni = adj[i];
+      for (let ji = 0; ji < ni.length; ji++) {
+        const j = ni[ji];
+        if (j <= i) continue;
+        const alpha = (1 - dist[i][j] / r) * 0.55;
+        ctx.strokeStyle = `rgba(${c.r},${c.g},${c.b},${alpha.toFixed(3)})`;
+        ctx.beginPath();
+        ctx.moveTo(nodes[i].x, nodes[i].y);
+        ctx.lineTo(nodes[j].x, nodes[j].y);
+        ctx.stroke();
+      }
+    }
+
+    // 0-simplices: nodes (on top)
+    ctx.fillStyle = `rgba(${c.r},${c.g},${c.b},0.70)`;
+    for (let i = 0; i < n; i++) {
       ctx.beginPath();
-      ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+      ctx.arc(nodes[i].x, nodes[i].y, nodes[i].r, 0, Math.PI * 2);
       ctx.fill();
     }
+
     raf = requestAnimationFrame(step);
   }
+
   window.addEventListener('resize', () => { cancelAnimationFrame(raf); resize(); step(); });
   if (window.matchMedia) {
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { color = getColor(); });
